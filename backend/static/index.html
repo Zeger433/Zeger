@@ -1,0 +1,124 @@
+﻿<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zeger</title>
+<style>
+:root{--bg:#e9ecf0;--line:#d7dce3;--ink:#18202b;--dim:#667386;--blue:#2b59d9;--term:#0f1a2b;--mono:ui-monospace,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:grid;grid-template-columns:minmax(320px,38%) 1fr;gap:12px;padding:12px;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,sans-serif}
+section,.right{min-height:0}
+section{background:#fff;border:1px solid var(--line);border-radius:10px;display:flex;flex-direction:column}
+.right{display:grid;grid-template-rows:1fr 1fr;gap:12px}
+h2{margin:0;padding:9px 14px;font-size:13px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}
+h2 span{font-weight:400;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:12px}
+.scroll{flex:1;overflow:auto;padding:14px}
+.m{margin:0 0 10px;max-width:92%;white-space:pre-wrap;overflow-wrap:anywhere}
+.user{margin-left:auto;background:var(--blue);color:#fff;padding:7px 12px;border-radius:12px 12px 2px 12px}
+.assistant{background:var(--bg);padding:7px 12px;border-radius:12px 12px 12px 2px}
+.system{color:var(--dim)}
+.error{background:#fbe3e1;color:#8c231c;padding:7px 12px;border-radius:8px}
+.done,.needs_help{border-left:3px solid #2f9e6b;padding-left:10px}
+.needs_help{border-color:#e0a526}
+form{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}
+textarea{flex:1;height:62px;resize:none;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+button{border:0;border-radius:8px;padding:0 18px;background:var(--blue);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.stop{background:#d4483f}
+.card{background:var(--term);color:#d6e2f5;border-radius:8px;margin-bottom:10px;font:12.5px/1.5 var(--mono);overflow:hidden}
+.ch{display:flex;gap:10px;padding:7px 12px;background:rgba(255,255,255,.06)}
+.ch .t{color:#7f93b2}
+.ch .c{flex:1;white-space:pre-wrap;overflow-wrap:anywhere}
+.run{color:#f2c14e}.ok{color:#5fd39b}.err{color:#ff8a80}
+.card pre{margin:0;padding:7px 12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}
+.card pre:empty{display:none}
+.body{color:#7f93b2;border-bottom:1px solid rgba(255,255,255,.08)}
+#shot{max-width:100%;border:1px solid var(--line);border-radius:6px;display:none}
+@media(max-width:820px){body{grid-template-columns:1fr;height:auto}section{height:70vh}.right{grid-template-rows:60vh 60vh}}
+</style>
+<section>
+  <h2>Zeger <span id="state">Connecting</span></h2>
+  <div class="scroll" id="log"></div>
+  <form id="form">
+    <textarea id="in" aria-label="Task" placeholder="Describe a task, e.g. add input validation to signup() and make the tests pass"></textarea>
+    <button id="go">Send</button>
+  </form>
+</section>
+<div class="right">
+  <section><h2>Commands</h2><div class="scroll" id="feed"></div></section>
+  <section><h2>Browser <span id="url">nothing opened yet</span></h2><div class="scroll"><img id="shot" alt="Browser view"></div></section>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const send = msg => ws.send(JSON.stringify(msg));
+const cards = {};
+let ws, running = false;
+
+function add(parent, tag, cls, text = '') {
+  const el = document.createElement(tag);
+  el.className = cls;
+  el.textContent = text;
+  parent.append(el);
+  return el;
+}
+
+const label = {run_command: ['$', 'command'], read_file: ['read', 'path'], write_file: ['write', 'path'],
+               edit_file: ['edit', 'path'], list_files: ['ls', 'path']};
+
+const handlers = {
+  message: ev => add($('#log'), 'div', 'm ' + ev.role, ev.text).scrollIntoView(),
+  finish: ev => add($('#log'), 'div', 'm ' + ev.status, (ev.status === 'done' ? 'Done: ' : 'Needs your input: ') + ev.summary).scrollIntoView(),
+  status: ev => {
+    running = ev.state === 'running';
+    $('#state').textContent = running ? 'Working' : 'Idle';
+    $('#go').textContent = running ? 'Stop' : 'Send';
+    $('#go').className = running ? 'stop' : '';
+  },
+  action: ev => {
+    const a = ev.args, [name, key] = label[ev.tool] || ['browser'];
+    const title = key ? a[key] : [a.action, a.url, a.index, a.text].filter(v => v != null && v !== '').join(' ');
+    const card = add($('#feed'), 'div', 'card'), head = add(card, 'div', 'ch');
+    add(head, 'span', 't', name);
+    add(head, 'span', 'c', title);
+    const status = add(head, 'span', 'run', 'running');
+    const detail = ev.tool === 'write_file' ? a.content : ev.tool === 'edit_file' ? `- ${a.old_str}\n+ ${a.new_str}` : '';
+    add(card, 'pre', 'body', detail);
+    cards[ev.id] = {status, out: add(card, 'pre', 'out')};
+    card.scrollIntoView();
+  },
+  observation: ev => {
+    const card = cards[ev.id];
+    const failed = ev.exit_code || ev.output.startsWith('Error:');
+    card.status.className = failed ? 'err' : 'ok';
+    card.status.textContent = ev.exit_code != null ? 'exit ' + ev.exit_code : failed ? 'failed' : 'ok';
+    if (failed || !['write_file', 'edit_file'].includes(ev.tool)) card.out.textContent = ev.output.slice(0, 6000);
+    if (ev.screenshot) {
+      $('#shot').src = 'data:image/jpeg;base64,' + ev.screenshot;
+      $('#shot').style.display = 'block';
+      $('#url').textContent = ev.url;
+    }
+  },
+};
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => handlers.status({state: 'idle'});
+  ws.onclose = () => { $('#state').textContent = 'Disconnected, retrying'; setTimeout(connect, 2000); };
+  ws.onmessage = e => { const ev = JSON.parse(e.data); handlers[ev.type](ev); };
+}
+
+$('#form').onsubmit = e => {
+  e.preventDefault();
+  if (running) return send({type: 'stop'});
+  const text = $('#in').value.trim();
+  if (!text) return;
+  add($('#log'), 'div', 'm user', text).scrollIntoView();
+  send({type: 'user', text});
+  $('#in').value = '';
+};
+$('#in').onkeydown = e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!running) $('#form').requestSubmit(); }
+};
+connect();
+</script>
+</html>
+

@@ -1,0 +1,24 @@
+x-workspace: &workspace
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  volumes: ["${WORKSPACE:?set WORKSPACE in .env}:/workspace"]
+
+services:
+  sandbox:  # commands and the browser run here, never on your machine. Has no API keys.
+    <<: *workspace
+    build: ./sandbox
+    mem_limit: 4g
+    pids_limit: 512
+    shm_size: 1g
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 3s
+      retries: 30
+  backend:  # web UI, agent loop and file tools. Holds the API keys.
+    <<: *workspace
+    build: ./backend
+    env_file: .env
+    environment: {HOME: /tmp}
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      sandbox: {condition: service_healthy}
